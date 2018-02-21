@@ -8,6 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
 
 using namespace std;
 
@@ -200,7 +201,13 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  // Lane information, 0 = left, 1 = middle, 2 = right
+  int lane = 1;
+
+  // Reference velocity to target
+  double ref_vel = 49.5;  //mph
+
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&lane,&ref_vel](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -217,9 +224,9 @@ int main() {
         string event = j[0].get<string>();
         
         if (event == "telemetry") {
-          // j[1] is the data JSON object
+            // j[1] is the data JSON object
           
-        	// Main car's localization Data
+        	  // Main car's localization Data
           	double car_x = j[1]["x"];
           	double car_y = j[1]["y"];
           	double car_s = j[1]["s"];
@@ -227,9 +234,16 @@ int main() {
           	double car_yaw = j[1]["yaw"];
           	double car_speed = j[1]["speed"];
 
+            // Main car's reference data
+            double ref_x = car_x;
+            double ref_y = car_y;
+            double ref_yaw = deg2rad(car_yaw);
+
           	// Previous path data given to the Planner
           	auto previous_path_x = j[1]["previous_path_x"];
           	auto previous_path_y = j[1]["previous_path_y"];
+          	int previous_size = previous_path_x.size();
+
           	// Previous path's end s and d values 
           	double end_path_s = j[1]["end_path_s"];
           	double end_path_d = j[1]["end_path_d"];
@@ -237,15 +251,93 @@ int main() {
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
 
-          	json msgJson;
+          	// Create evenly spaced anchor waypoints
+            vector<double> anchor_x;
+            vector<double> anchor_y;
 
-          	vector<double> next_x_vals;
-          	vector<double> next_y_vals;
+            if (previous_size < 2)
+            {
+              // Use two points that make the path tangent to the car using
+              // the cars current position
+              double prev_car_x = car_x - cos(car_yaw);
+              double prev_car_y = car_y - sin(car_yaw);
+              anchor_x.push_back(prev_car_x);
+              anchor_x.push_back(car_x);
+              anchor_y.push_back(prev_car_y);
+              anchor_y.push_back(car_y);
+            }
+            else
+            {
+              // Or use two points from the previous position
+              ref_x = previous_path_x[previous_size-1];
+              ref_y = previous_path_y[previous_size-1];
+              double prev_ref_x = previous_path_x[previous_size-2];
+              double prev_ref_y = previous_path_y[previous_size-2];
+              ref_yaw = atan2(ref_y-prev_ref_y, ref_x-prev_ref_x);
+              anchor_x.push_back(prev_ref_x);
+              anchor_x.push_back(ref_x);
+              anchor_y.push_back(prev_ref_y);
+              anchor_y.push_back(ref_y);
+            }
 
+            // Add evenly spaced (in Frenet) points ahead
+            double SPLINE_S_SPACING = 30.0;
+            double next_d = 2 + 4*lane;
+            for (double i=SPLINE_S_SPACING; i<=3*SPLINE_S_SPACING; i+=SPLINE_S_SPACING)
+            {
+              vector<double> next_wp = getXY((car_s+i), next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+              anchor_x.push_back(next_wp[0]);
+              anchor_y.push_back(next_wp[1]);
+            }
 
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
-          	msgJson["next_x"] = next_x_vals;
-          	msgJson["next_y"] = next_y_vals;
+            // Transform to the vehicle's perspective
+            for (int i=0; i <anchor_x.size(); i++)
+            {
+              double shift_x = anchor_x[i]-ref_x;
+              double shift_y = anchor_y[i]-ref_y;
+
+              anchor_x[i] = shift_x*cos(0-ref_yaw) - shift_y*sin(0-ref_yaw);
+              anchor_y[i] = shift_x*sin(0-ref_yaw) + shift_y*cos(0-ref_yaw);
+            }
+
+            // Create the spline with the anchor points
+            tk::spline s;
+            s.set_points(anchor_x, anchor_y);
+
+            vector<double> next_x_vals;
+            vector<double> next_y_vals;
+
+            // Add the previous points to the path to help with the transition
+            for (int i=0; i<previous_size; i++)
+            {
+              next_x_vals.push_back(previous_path_x[i]);
+              next_y_vals.push_back(previous_path_y[i]);
+            }
+
+            // Breakup the spline points to travel at the reference velocity
+            double horizon_x = 30.0;
+            double horizon_y = s(horizon_x);
+            double target_dist = sqrt((horizon_x*horizon_x)+(horizon_y*horizon_y));
+            double N = target_dist/(0.02*ref_vel/2.24); //convert to m
+            double x_spacing = horizon_x/N;
+
+              // Fill up the path
+              int x_max = (49-previous_size) * x_spacing;
+              for (double x=0; x<x_max; x+=x_spacing)
+              {
+                double y = s(x);
+
+                //translate back to world
+                double x_world = ref_x + x*cos(ref_yaw) - y*sin(ref_yaw);
+                double y_world = ref_y + x*sin(ref_yaw) + y*cos(ref_yaw);
+
+                next_x_vals.push_back(x_world);
+                next_y_vals.push_back(y_world);
+              }
+
+            json msgJson;
+            msgJson["next_x"] = next_x_vals;
+            msgJson["next_y"] = next_y_vals;
 
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
