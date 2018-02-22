@@ -20,6 +20,14 @@ constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
 
+enum LaneState
+{
+  LANE_KEEP = 0,
+  LANE_PREPARE_CHANGE,
+  LANE_CHANGE
+};
+
+
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
 // else the empty string "" will be returned.
@@ -202,12 +210,15 @@ int main() {
   }
 
   // Lane information, 0 = left, 1 = middle, 2 = right
+  LaneState laneState = LANE_KEEP;
   int lane = 1;
+  int lane_desired = 1;
+
 
   // Reference velocity to target
   double ref_vel = 0.0;  //mph
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&lane,&ref_vel](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&laneState,&lane,&lane_desired,&ref_vel](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -235,7 +246,6 @@ int main() {
           	double car_speed = j[1]["speed"];
           	double car_lane = 2 + 4*lane;
 
-
             // Main car's reference data
             double ref_x = car_x;
             double ref_y = car_y;
@@ -252,13 +262,15 @@ int main() {
 
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
+            double tracking_lane = 2 + 4*lane_desired;
+          	vector<double> tracking_gap;
           	bool collision_warning = false;
           	double collision_safe_speed = car_speed;
 
           	// Create evenly spaced anchor waypoints
             vector<double> anchor_x;
             vector<double> anchor_y;
-            double WAYPOINT_S_SPACING = 30.0;
+            double S_SPACING_m = 30.0;
 
             if (previous_size > 0)
             {
@@ -268,24 +280,41 @@ int main() {
             // Act base on other cars
             for (int i=0; i< sensor_fusion.size(); i++)
             {
-              // Car in lane
+              double vx = sensor_fusion[i][3];
+              double vy = sensor_fusion[i][4];
+              double check_speed = sqrt(vx*vx+vy*vy);
+              double check_car_s = sensor_fusion[i][5];
+              check_car_s += ((double)previous_size*0.02*check_speed);
               float d = sensor_fusion[i][6];
 
+              // Car in lane
               if ((d < car_lane+2) && (d > car_lane-2))
               {
-                double check_x = sensor_fusion[i][3];
-                double check_y = sensor_fusion[i][4];
-                double check_speed = sqrt(check_x*check_x+check_y*check_y);
-                double check_car_s = sensor_fusion[i][5];
-                check_car_s += ((double)previous_size*0.02*check_speed);
-
-                if ((check_car_s > car_s) && ((check_car_s-car_s) < WAYPOINT_S_SPACING))
+                //Slow car that needs to be passed
+                if ((check_car_s > car_s) && ((check_car_s-car_s) < S_SPACING_m))
                 {
                   collision_warning = true;
                   collision_safe_speed = check_speed;
+                  //Prepare for changing
+                  if (laneState == LANE_KEEP)
+                  {
+                    laneState = LANE_PREPARE_CHANGE;
+                    lane_desired = (lane == 0) ? (lane + 1) : (lane - 1);
+                    tracking_lane = 2 + 4*lane_desired;
+                  }
+                }
+              }
+              // Car in desired lane
+              else if ((laneState == LANE_PREPARE_CHANGE) && (d < tracking_lane+2) && (d > tracking_lane-2))
+              {
+                // Record no gap
+                if (abs(check_car_s-car_s) < S_SPACING_m)
+                {
+                  tracking_gap.push_back(check_car_s);
                 }
               }
             }
+
 
             if (previous_size < 2)
             {
@@ -312,9 +341,21 @@ int main() {
               anchor_y.push_back(ref_y);
             }
 
-            // Add evenly spaced (in Frenet) points ahead
+            // Add evenly spaced (in Frenet) points ahead, changing lanes if needed
             double next_d = car_lane;
-            for (double i=WAYPOINT_S_SPACING; i<=3*WAYPOINT_S_SPACING; i+=WAYPOINT_S_SPACING)
+            if ((laneState == LANE_PREPARE_CHANGE) && (tracking_gap.size() == 0))
+            {
+              laneState = LANE_CHANGE;
+            }
+
+            if (laneState == LANE_CHANGE)
+            {
+              lane = lane_desired;
+              next_d = 2 + 4*lane;
+              laneState = LANE_KEEP;
+            }
+
+            for (double i=S_SPACING_m; i<=3*S_SPACING_m; i+=S_SPACING_m)
             {
               vector<double> next_wp = getXY((car_s+i), next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
               anchor_x.push_back(next_wp[0]);
@@ -346,12 +387,12 @@ int main() {
             }
 
             // Breakup the spline points to travel at the reference velocity
-            double horizon_x = WAYPOINT_S_SPACING;
+            double horizon_x = S_SPACING_m;
             double horizon_y = s(horizon_x);
             double target_dist = sqrt((horizon_x*horizon_x)+(horizon_y*horizon_y));
             double prev_x = 0;
 
-            // Fill up the path
+            // Fill up the path while adjusting velocity
             for (int i=0; i < 50-previous_size; i++)
             {
               if (collision_warning)
@@ -359,7 +400,7 @@ int main() {
                 if (ref_vel > collision_safe_speed)
                   ref_vel -= 0.224;
               }
-              if (!collision_warning && (ref_vel < 49.5))
+              else if (ref_vel < 49.5)
               {
                 ref_vel += 0.224;
               }
@@ -376,18 +417,6 @@ int main() {
               next_x_vals.push_back(x_world);
               next_y_vals.push_back(y_world);
             }
-//            int x_max = (49-previous_size) * x_spacing;
-//            for (double x=0; x<x_max; x+=x_spacing)
-//            {
-//              double y = s(x);
-//
-//              //translate back to world
-//              double x_world = ref_x + x*cos(ref_yaw) - y*sin(ref_yaw);
-//              double y_world = ref_y + x*sin(ref_yaw) + y*cos(ref_yaw);
-//
-//              next_x_vals.push_back(x_world);
-//              next_y_vals.push_back(y_world);
-//            }
 
             json msgJson;
             msgJson["next_x"] = next_x_vals;
