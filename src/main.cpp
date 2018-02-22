@@ -205,7 +205,7 @@ int main() {
   int lane = 1;
 
   // Reference velocity to target
-  double ref_vel = 49.5;  //mph
+  double ref_vel = 0.0;  //mph
 
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&lane,&ref_vel](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
@@ -233,6 +233,8 @@ int main() {
           	double car_d = j[1]["d"];
           	double car_yaw = j[1]["yaw"];
           	double car_speed = j[1]["speed"];
+          	double car_lane = 2 + 4*lane;
+
 
             // Main car's reference data
             double ref_x = car_x;
@@ -250,10 +252,40 @@ int main() {
 
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
+          	bool collision_warning = false;
+          	double collision_safe_speed = car_speed;
 
           	// Create evenly spaced anchor waypoints
             vector<double> anchor_x;
             vector<double> anchor_y;
+            double WAYPOINT_S_SPACING = 30.0;
+
+            if (previous_size > 0)
+            {
+              car_s = end_path_s;
+            }
+
+            // Act base on other cars
+            for (int i=0; i< sensor_fusion.size(); i++)
+            {
+              // Car in lane
+              float d = sensor_fusion[i][6];
+
+              if ((d < car_lane+2) && (d > car_lane-2))
+              {
+                double check_x = sensor_fusion[i][3];
+                double check_y = sensor_fusion[i][4];
+                double check_speed = sqrt(check_x*check_x+check_y*check_y);
+                double check_car_s = sensor_fusion[i][5];
+                check_car_s += ((double)previous_size*0.02*check_speed);
+
+                if ((check_car_s > car_s) && ((check_car_s-car_s) < WAYPOINT_S_SPACING))
+                {
+                  collision_warning = true;
+                  collision_safe_speed = check_speed;
+                }
+              }
+            }
 
             if (previous_size < 2)
             {
@@ -281,9 +313,8 @@ int main() {
             }
 
             // Add evenly spaced (in Frenet) points ahead
-            double SPLINE_S_SPACING = 30.0;
-            double next_d = 2 + 4*lane;
-            for (double i=SPLINE_S_SPACING; i<=3*SPLINE_S_SPACING; i+=SPLINE_S_SPACING)
+            double next_d = car_lane;
+            for (double i=WAYPOINT_S_SPACING; i<=3*WAYPOINT_S_SPACING; i+=WAYPOINT_S_SPACING)
             {
               vector<double> next_wp = getXY((car_s+i), next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
               anchor_x.push_back(next_wp[0]);
@@ -315,25 +346,48 @@ int main() {
             }
 
             // Breakup the spline points to travel at the reference velocity
-            double horizon_x = 30.0;
+            double horizon_x = WAYPOINT_S_SPACING;
             double horizon_y = s(horizon_x);
             double target_dist = sqrt((horizon_x*horizon_x)+(horizon_y*horizon_y));
-            double N = target_dist/(0.02*ref_vel/2.24); //convert to m
-            double x_spacing = horizon_x/N;
+            double prev_x = 0;
 
-              // Fill up the path
-              int x_max = (49-previous_size) * x_spacing;
-              for (double x=0; x<x_max; x+=x_spacing)
+            // Fill up the path
+            for (int i=0; i < 50-previous_size; i++)
+            {
+              if (collision_warning)
               {
-                double y = s(x);
-
-                //translate back to world
-                double x_world = ref_x + x*cos(ref_yaw) - y*sin(ref_yaw);
-                double y_world = ref_y + x*sin(ref_yaw) + y*cos(ref_yaw);
-
-                next_x_vals.push_back(x_world);
-                next_y_vals.push_back(y_world);
+                if (ref_vel > collision_safe_speed)
+                  ref_vel -= 0.224;
               }
+              if (!collision_warning && (ref_vel < 49.5))
+              {
+                ref_vel += 0.224;
+              }
+
+              double N = target_dist/(0.02*ref_vel/2.24); //convert to m
+              double x = prev_x + horizon_x/N;
+              prev_x = x;
+              double y = s(x);
+
+              //translate back to world
+              double x_world = ref_x + x*cos(ref_yaw) - y*sin(ref_yaw);
+              double y_world = ref_y + x*sin(ref_yaw) + y*cos(ref_yaw);
+
+              next_x_vals.push_back(x_world);
+              next_y_vals.push_back(y_world);
+            }
+//            int x_max = (49-previous_size) * x_spacing;
+//            for (double x=0; x<x_max; x+=x_spacing)
+//            {
+//              double y = s(x);
+//
+//              //translate back to world
+//              double x_world = ref_x + x*cos(ref_yaw) - y*sin(ref_yaw);
+//              double y_world = ref_y + x*sin(ref_yaw) + y*cos(ref_yaw);
+//
+//              next_x_vals.push_back(x_world);
+//              next_y_vals.push_back(y_world);
+//            }
 
             json msgJson;
             msgJson["next_x"] = next_x_vals;
