@@ -172,6 +172,24 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+// Check the neighboring car for passing clearance
+bool checkForPassingRoom(double car_s, double prepare_vel, double check_car_s, double check_car_speed)
+{
+  static const double S_SLOW_CAR_AHEAD_m = 40.0;
+  static const double S_PASSING_AHEAD_m = 20.0;
+  static const double S_PASSING_BEHIND_m = 10;
+
+  double clearance = abs(car_s-check_car_s);
+
+  bool aheadTooClose = (car_s < check_car_s) && (clearance < S_PASSING_AHEAD_m);
+  bool behindTooClose = (car_s > check_car_s) && (clearance < S_PASSING_BEHIND_m);
+  bool aheadSlower = (car_s < check_car_s) && (clearance < S_SLOW_CAR_AHEAD_m) && (check_car_speed < prepare_vel);
+  bool passingRoom = (aheadTooClose || behindTooClose || aheadSlower) ? false : true;
+  cout << "\t PassingRoom:" << passingRoom << "\t" << aheadTooClose << ":" << behindTooClose << ":" << aheadSlower << endl;
+
+  return passingRoom;
+}
+
 int main() {
   uWS::Hub h;
 
@@ -217,8 +235,9 @@ int main() {
 
   // Reference velocity to target
   double ref_vel = 0.0;  //mph
+  double prepare_vel = 0;
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&laneState,&lane,&lane_desired,&ref_vel](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&laneState,&lane,&lane_desired,&ref_vel, &prepare_vel](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -262,24 +281,26 @@ int main() {
 
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
-            double tracking_lane = 2 + 4*lane_desired;
-          	vector<double> tracking_gap;
+            double passing_lane = 2 + 4*lane_desired;
+          	bool passing_allowed = true;
+          	bool pass_on_right = (lane == 1) ? true : false;
           	bool collision_warning = false;
-          	double collision_safe_speed = car_speed;
 
           	// Create evenly spaced anchor waypoints
             vector<double> anchor_x;
             vector<double> anchor_y;
-            double S_SPACING_m = 30.0;
+            static const double S_SPACING_m = 30.0;
 
             if (previous_size > 0)
             {
               car_s = end_path_s;
             }
+            cout << "Lane:" << lane << "\tState:" << laneState << "\tSpeed:" << car_speed << "\tS:" << car_s << endl;
 
             // Act base on other cars
             for (int i=0; i< sensor_fusion.size(); i++)
             {
+              double id = sensor_fusion[i][0];
               double vx = sensor_fusion[i][3];
               double vy = sensor_fusion[i][4];
               double check_speed = sqrt(vx*vx+vy*vy);
@@ -294,23 +315,24 @@ int main() {
                 if ((check_car_s > car_s) && ((check_car_s-car_s) < S_SPACING_m))
                 {
                   collision_warning = true;
-                  collision_safe_speed = check_speed;
-                  //Prepare for changing
-                  if (laneState == LANE_KEEP)
-                  {
-                    laneState = LANE_PREPARE_CHANGE;
-                    lane_desired = (lane == 0) ? (lane + 1) : (lane - 1);
-                    tracking_lane = 2 + 4*lane_desired;
-                  }
+                  prepare_vel = check_speed;
+
+                  if (ref_vel > prepare_vel)
+                    ref_vel -= 0.224;
                 }
               }
-              // Car in desired lane
-              else if ((laneState == LANE_PREPARE_CHANGE) && (d < tracking_lane+2) && (d > tracking_lane-2))
+              // Trying to change lanes
+              else if (laneState == LANE_PREPARE_CHANGE)
               {
-                // Record no gap
-                if (abs(check_car_s-car_s) < S_SPACING_m)
+                // Record no gap if desired lane is occupied
+                if ((d < passing_lane+2) && (d > passing_lane-2))
                 {
-                  tracking_gap.push_back(check_car_s);
+                  passing_allowed &= checkForPassingRoom(car_s, prepare_vel, check_car_s, check_speed);
+                }
+                // Otherwise look for a right opening from center
+                else if ((lane == 1) && (d > lane+2))
+                {
+                  pass_on_right &= checkForPassingRoom(car_s, prepare_vel, check_car_s, check_speed);
                 }
               }
             }
@@ -341,20 +363,40 @@ int main() {
               anchor_y.push_back(ref_y);
             }
 
-            // Add evenly spaced (in Frenet) points ahead, changing lanes if needed
+            // Deal with lane changes
             double next_d = car_lane;
-            if ((laneState == LANE_PREPARE_CHANGE) && (tracking_gap.size() == 0))
+            switch (laneState)
             {
-              laneState = LANE_CHANGE;
+              case LANE_PREPARE_CHANGE:
+                if (passing_allowed)
+                {
+                  laneState = LANE_CHANGE;
+                }
+                else if (pass_on_right)
+                {
+                  lane_desired = lane + 1;
+                  laneState = LANE_CHANGE;
+                }
+                break;
+
+              case LANE_CHANGE:
+                lane = lane_desired;
+                next_d = 2 + 4*lane;
+                laneState = LANE_KEEP;
+                break;
+
+              case LANE_KEEP:
+              default:
+                if (collision_warning)
+                {
+                  laneState = LANE_PREPARE_CHANGE;
+                  lane_desired = (lane == 0) ? (lane + 1) : (lane - 1);
+                  passing_lane = 2 + 4*lane_desired;
+                }
+                break;
             }
 
-            if (laneState == LANE_CHANGE)
-            {
-              lane = lane_desired;
-              next_d = 2 + 4*lane;
-              laneState = LANE_KEEP;
-            }
-
+            // Add evenly spaced (in Frenet) points ahead
             for (double i=S_SPACING_m; i<=3*S_SPACING_m; i+=S_SPACING_m)
             {
               vector<double> next_wp = getXY((car_s+i), next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
@@ -395,12 +437,7 @@ int main() {
             // Fill up the path while adjusting velocity
             for (int i=0; i < 50-previous_size; i++)
             {
-              if (collision_warning)
-              {
-                if (ref_vel > collision_safe_speed)
-                  ref_vel -= 0.224;
-              }
-              else if (ref_vel < 49.5)
+              if (!collision_warning && (ref_vel < 49.5))
               {
                 ref_vel += 0.224;
               }
