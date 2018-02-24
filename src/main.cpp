@@ -27,10 +27,13 @@ enum LaneState
   LANE_CHANGE
 };
 
+#define DEBUG_COUT = true;
 
-// Checks if the SocketIO event has JSON data.
-// If there is data the JSON object in string format will be returned,
-// else the empty string "" will be returned.
+/******************************************************************************
+ * Checks if the SocketIO event has JSON data.
+ * If there is data the JSON object in string format will be returned, else
+ * the empty string "" will be returned.
+ */
 string hasData(string s) {
   auto found_null = s.find("null");
   auto b1 = s.find_first_of("[");
@@ -43,10 +46,17 @@ string hasData(string s) {
   return "";
 }
 
+/******************************************************************************
+ * Helper distance calculation
+ */
 double distance(double x1, double y1, double x2, double y2)
 {
 	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
 }
+
+/******************************************************************************
+ * Closest waypoint finder
+ */
 int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y)
 {
 
@@ -70,6 +80,9 @@ int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vect
 
 }
 
+/******************************************************************************
+ * Next waypoint finder
+ */
 int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
 {
 
@@ -95,7 +108,9 @@ int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x,
   return closestWaypoint;
 }
 
-// Transform from Cartesian x,y coordinates to Frenet s,d coordinates
+/******************************************************************************
+ * Transform from Cartesian x,y coordinates to Frenet s,d coordinates
+ */
 vector<double> getFrenet(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
 {
 	int next_wp = NextWaypoint(x,y, theta, maps_x,maps_y);
@@ -144,7 +159,9 @@ vector<double> getFrenet(double x, double y, double theta, const vector<double> 
 
 }
 
-// Transform from Frenet s,d coordinates to Cartesian x,y
+/******************************************************************************
+ * Transform from Frenet s,d coordinates to Cartesian x,y
+ */
 vector<double> getXY(double s, double d, const vector<double> &maps_s, const vector<double> &maps_x, const vector<double> &maps_y)
 {
 	int prev_wp = -1;
@@ -172,24 +189,52 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
-// Check the neighboring car for passing clearance
-bool checkForPassingRoom(double car_s, double prepare_vel, double check_car_s, double check_car_speed)
+/******************************************************************************
+ * Check the lane for a potential collision
+ */
+bool checkForCollision(double ego_lane, double ego_s, double check_d, double check_s)
+{
+  static const double COLLISION_m = 30.0;
+  double lane_d = 2 + 4*ego_lane;
+
+  bool inLane = (check_d < lane_d+2) & (check_d > lane_d-2);
+  bool tooClose = (check_s > ego_s) & ((check_s-ego_s) < COLLISION_m);
+  bool collision = (inLane && tooClose) ? true : false;
+
+#ifdef DEBUG_COUT
+  if (collision)
+    cout << "\tCollision:" << collision << "\t" << inLane << ":" << tooClose << endl;
+#endif
+
+  return collision;
+}
+
+/******************************************************************************
+ * Check the desired car for passing clearance
+ */
+bool checkForPassingRoom(double ego_s, double ego_vel, double check_s, double check_vel)
 {
   static const double S_SLOW_CAR_AHEAD_m = 40.0;
   static const double S_PASSING_AHEAD_m = 20.0;
   static const double S_PASSING_BEHIND_m = 10;
 
-  double clearance = abs(car_s-check_car_s);
+  double clearance = abs(ego_s-check_s);
 
-  bool aheadTooClose = (car_s < check_car_s) && (clearance < S_PASSING_AHEAD_m);
-  bool behindTooClose = (car_s > check_car_s) && (clearance < S_PASSING_BEHIND_m);
-  bool aheadSlower = (car_s < check_car_s) && (clearance < S_SLOW_CAR_AHEAD_m) && (check_car_speed < prepare_vel);
+  bool aheadTooClose = (ego_s < check_s) & (clearance < S_PASSING_AHEAD_m);
+  bool behindTooClose = (ego_s > check_s) & (clearance < S_PASSING_BEHIND_m);
+  bool aheadSlower = (ego_s < check_s) & (clearance < S_SLOW_CAR_AHEAD_m) & (check_vel < ego_vel);
   bool passingRoom = (aheadTooClose || behindTooClose || aheadSlower) ? false : true;
+
+#ifdef DEBUG_COUT
   cout << "\t PassingRoom:" << passingRoom << "\t" << aheadTooClose << ":" << behindTooClose << ":" << aheadSlower << endl;
+#endif
 
   return passingRoom;
 }
 
+/******************************************************************************
+ * MAIN
+ */
 int main() {
   uWS::Hub h;
 
@@ -286,57 +331,96 @@ int main() {
           	bool pass_on_right = (lane == 1) ? true : false;
           	bool collision_warning = false;
 
-          	// Create evenly spaced anchor waypoints
-            vector<double> anchor_x;
-            vector<double> anchor_y;
             static const double S_SPACING_m = 30.0;
 
             if (previous_size > 0)
             {
               car_s = end_path_s;
             }
-            cout << "Lane:" << lane << "\tState:" << laneState << "\tSpeed:" << car_speed << "\tS:" << car_s << endl;
 
-            // Act base on other cars
+            //Helpful printing if needed for debug
+#ifdef DEBUG_COUT
+            cout << "Lane:" << lane << "\tState:" << laneState
+                 << "\tSpeed:" << car_speed << "\tS:" << car_s
+                 << "\tD:" << car_d << endl;
+#endif
+
+            /******************************************************************
+             * Vehicle Tracking
+             */
             for (int i=0; i< sensor_fusion.size(); i++)
             {
-              double id = sensor_fusion[i][0];
               double vx = sensor_fusion[i][3];
               double vy = sensor_fusion[i][4];
               double check_speed = sqrt(vx*vx+vy*vy);
-              double check_car_s = sensor_fusion[i][5];
-              check_car_s += ((double)previous_size*0.02*check_speed);
-              float d = sensor_fusion[i][6];
+              double check_s = sensor_fusion[i][5];
+              check_s += ((double)previous_size*0.02*check_speed);
+              float check_d = sensor_fusion[i][6];
 
               // Car in lane
-              if ((d < car_lane+2) && (d > car_lane-2))
+              if (checkForCollision(lane, car_s, check_d, check_s))
               {
-                //Slow car that needs to be passed
-                if ((check_car_s > car_s) && ((check_car_s-car_s) < S_SPACING_m))
-                {
-                  collision_warning = true;
-                  prepare_vel = check_speed;
+                collision_warning = true;
+                prepare_vel = check_speed;
 
-                  if (ref_vel > prepare_vel)
-                    ref_vel -= 0.224;
-                }
+                if (ref_vel > prepare_vel)
+                  ref_vel -= 0.224;
               }
               // Trying to change lanes
               else if (laneState == LANE_PREPARE_CHANGE)
               {
                 // Record no gap if desired lane is occupied
-                if ((d < passing_lane+2) && (d > passing_lane-2))
+                if ((check_d < passing_lane+2) && (check_d > passing_lane-2))
                 {
-                  passing_allowed &= checkForPassingRoom(car_s, prepare_vel, check_car_s, check_speed);
+                  passing_allowed &= checkForPassingRoom(car_s, prepare_vel, check_s, check_speed);
                 }
                 // Otherwise look for a right opening from center
-                else if ((lane == 1) && (d > lane+2))
+                else if ((lane == 1) && (check_d > lane+2))
                 {
-                  pass_on_right &= checkForPassingRoom(car_s, prepare_vel, check_car_s, check_speed);
+                  pass_on_right &= checkForPassingRoom(car_s, prepare_vel, check_s, check_speed);
                 }
               }
             }
 
+            /******************************************************************
+             * Simplistic Path Planning
+             */
+            switch (laneState)
+            {
+              case LANE_PREPARE_CHANGE:
+                if (passing_allowed)
+                {
+                  laneState = LANE_CHANGE;
+                }
+                else if (pass_on_right)
+                {
+                  lane_desired = lane + 1;
+                  laneState = LANE_CHANGE;
+                }
+                break;
+
+              case LANE_CHANGE:
+                lane = lane_desired;
+                laneState = LANE_KEEP;
+                break;
+
+              case LANE_KEEP:
+              default:
+                if (collision_warning)
+                {
+                  lane_desired = (lane == 0) ? (lane + 1) : (lane - 1);
+                  laneState = LANE_PREPARE_CHANGE;
+                }
+                break;
+            }
+
+
+            /******************************************************************
+             * Trajectory Generation
+             */
+            // Create evenly spaced anchor waypoints
+            vector<double> anchor_x;
+            vector<double> anchor_y;
 
             if (previous_size < 2)
             {
@@ -363,40 +447,8 @@ int main() {
               anchor_y.push_back(ref_y);
             }
 
-            // Deal with lane changes
-            double next_d = car_lane;
-            switch (laneState)
-            {
-              case LANE_PREPARE_CHANGE:
-                if (passing_allowed)
-                {
-                  laneState = LANE_CHANGE;
-                }
-                else if (pass_on_right)
-                {
-                  lane_desired = lane + 1;
-                  laneState = LANE_CHANGE;
-                }
-                break;
-
-              case LANE_CHANGE:
-                lane = lane_desired;
-                next_d = 2 + 4*lane;
-                laneState = LANE_KEEP;
-                break;
-
-              case LANE_KEEP:
-              default:
-                if (collision_warning)
-                {
-                  laneState = LANE_PREPARE_CHANGE;
-                  lane_desired = (lane == 0) ? (lane + 1) : (lane - 1);
-                  passing_lane = 2 + 4*lane_desired;
-                }
-                break;
-            }
-
             // Add evenly spaced (in Frenet) points ahead
+            double next_d = car_lane;
             for (double i=S_SPACING_m; i<=3*S_SPACING_m; i+=S_SPACING_m)
             {
               vector<double> next_wp = getXY((car_s+i), next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
@@ -455,6 +507,9 @@ int main() {
               next_y_vals.push_back(y_world);
             }
 
+            /******************************************************************
+             * X,Y Update
+             */
             json msgJson;
             msgJson["next_x"] = next_x_vals;
             msgJson["next_y"] = next_y_vals;
