@@ -20,6 +20,9 @@ constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
 
+// For converting from lane and d
+double lane2d(double lane) { return 2 + 4*lane; }
+
 enum LaneState
 {
   LANE_KEEP = 0,
@@ -192,7 +195,7 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 /******************************************************************************
  * Check the lane for a potential collision
  */
-bool checkForCollision(double ego_lane, double ego_s, double check_d, double check_s)
+bool checkForCollision(double ego_lane, double ego_s, int check_id, double check_d, double check_s)
 {
   static const double COLLISION_m = 30.0;
   double lane_d = 2 + 4*ego_lane;
@@ -203,7 +206,7 @@ bool checkForCollision(double ego_lane, double ego_s, double check_d, double che
 
 #ifdef DEBUG_COUT
   if (collision)
-    cout << "\tCollision:" << collision << "\t" << inLane << ":" << tooClose << endl;
+    cout << "\tCollision with " << check_id << endl;
 #endif
 
   return collision;
@@ -212,11 +215,11 @@ bool checkForCollision(double ego_lane, double ego_s, double check_d, double che
 /******************************************************************************
  * Check the desired car for passing clearance
  */
-bool checkForPassingRoom(double ego_s, double ego_vel, double check_s, double check_vel)
+bool checkForPassingRoom(double ego_s, double ego_vel, int check_id, double check_s, double check_vel)
 {
   static const double S_SLOW_CAR_AHEAD_m = 40.0;
-  static const double S_PASSING_AHEAD_m = 20.0;
-  static const double S_PASSING_BEHIND_m = 10;
+  static const double S_PASSING_AHEAD_m = 15.0;
+  static const double S_PASSING_BEHIND_m = 7.5;
 
   double clearance = abs(ego_s-check_s);
 
@@ -226,10 +229,29 @@ bool checkForPassingRoom(double ego_s, double ego_vel, double check_s, double ch
   bool passingRoom = (aheadTooClose || behindTooClose || aheadSlower) ? false : true;
 
 #ifdef DEBUG_COUT
-  cout << "\t PassingRoom:" << passingRoom << "\t" << aheadTooClose << ":" << behindTooClose << ":" << aheadSlower << endl;
+  if (!passingRoom)
+    cout << "\tPassing blocked " << check_id << "\t" << aheadTooClose << aheadSlower << ":" << behindTooClose << endl;
 #endif
 
   return passingRoom;
+}
+
+/******************************************************************************
+ * Check that the ego completed the lane change
+ */
+bool checkInLane(double ego_lane, double ego_d)
+{
+  double lane_d = 2 + 4*ego_lane;
+  double tolerance_d = 1;
+  double delta_d = abs(ego_d - lane_d);
+  bool inLane = (delta_d <= tolerance_d);
+
+#ifdef DEBUG_COUT
+  if (!inLane)
+    cout << "\t!InLane:" << delta_d << endl;
+#endif
+
+  return inLane;
 }
 
 /******************************************************************************
@@ -308,7 +330,6 @@ int main() {
           	double car_d = j[1]["d"];
           	double car_yaw = j[1]["yaw"];
           	double car_speed = j[1]["speed"];
-          	double car_lane = 2 + 4*lane;
 
             // Main car's reference data
             double ref_x = car_x;
@@ -326,23 +347,21 @@ int main() {
 
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
-            double passing_lane = 2 + 4*lane_desired;
+            double passing_lane_d = lane2d(lane_desired);
           	bool passing_allowed = true;
+          	static const double RIGHT_LANE_MIN_d = lane2d(2) - 2;
           	bool pass_on_right = (lane == 1) ? true : false;
           	bool collision_warning = false;
-
-            static const double S_SPACING_m = 30.0;
 
             if (previous_size > 0)
             {
               car_s = end_path_s;
+              car_d = end_path_d;
             }
 
             //Helpful printing if needed for debug
 #ifdef DEBUG_COUT
-            cout << "Lane:" << lane << "\tState:" << laneState
-                 << "\tSpeed:" << car_speed << "\tS:" << car_s
-                 << "\tD:" << car_d << endl;
+            cout << "Lane:" << lane << " (" << laneState << ") S:" << car_s << " D:" << car_d << endl;
 #endif
 
             /******************************************************************
@@ -350,6 +369,7 @@ int main() {
              */
             for (int i=0; i< sensor_fusion.size(); i++)
             {
+              int check_id = sensor_fusion[i][0];
               double vx = sensor_fusion[i][3];
               double vy = sensor_fusion[i][4];
               double check_speed = sqrt(vx*vx+vy*vy);
@@ -358,7 +378,7 @@ int main() {
               float check_d = sensor_fusion[i][6];
 
               // Car in lane
-              if (checkForCollision(lane, car_s, check_d, check_s))
+              if (checkForCollision(lane, car_s, check_id, check_d, check_s))
               {
                 collision_warning = true;
                 prepare_vel = check_speed;
@@ -370,14 +390,14 @@ int main() {
               else if (laneState == LANE_PREPARE_CHANGE)
               {
                 // Record no gap if desired lane is occupied
-                if ((check_d < passing_lane+2) && (check_d > passing_lane-2))
+                if ((check_d < passing_lane_d+2) && (check_d > passing_lane_d-2))
                 {
-                  passing_allowed &= checkForPassingRoom(car_s, prepare_vel, check_s, check_speed);
+                  passing_allowed &= checkForPassingRoom(car_s, prepare_vel, check_id, check_s, check_speed);
                 }
                 // Otherwise look for a right opening from center
-                else if ((lane == 1) && (check_d > lane+2))
+                else if ((lane == 1) && (check_d > RIGHT_LANE_MIN_d))
                 {
-                  pass_on_right &= checkForPassingRoom(car_s, prepare_vel, check_s, check_speed);
+                  pass_on_right &= checkForPassingRoom(car_s, prepare_vel, check_id, check_s, check_speed);
                 }
               }
             }
@@ -394,19 +414,25 @@ int main() {
                 }
                 else if (pass_on_right)
                 {
-                  lane_desired = lane + 1;
+                  lane_desired = 2;
                   laneState = LANE_CHANGE;
+#ifdef DEBUG_COUT
+                  cout << "\tRight lane pass" << endl;
+#endif
                 }
                 break;
 
               case LANE_CHANGE:
                 lane = lane_desired;
                 laneState = LANE_KEEP;
+                //clear the collision_warning so that the car can increase speed
+                //with the lane change
+                collision_warning = false;
                 break;
 
               case LANE_KEEP:
               default:
-                if (collision_warning)
+                if (collision_warning && checkInLane(lane, car_d))
                 {
                   lane_desired = (lane == 0) ? (lane + 1) : (lane - 1);
                   laneState = LANE_PREPARE_CHANGE;
@@ -448,7 +474,8 @@ int main() {
             }
 
             // Add evenly spaced (in Frenet) points ahead
-            double next_d = car_lane;
+            static const double S_SPACING_m = 30.0;
+            double next_d = lane2d(lane);
             for (double i=S_SPACING_m; i<=3*S_SPACING_m; i+=S_SPACING_m)
             {
               vector<double> next_wp = getXY((car_s+i), next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
