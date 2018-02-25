@@ -45,7 +45,7 @@ enum LaneState
 
 static const double TARGET_VEL = 49.5;
 
-#define DEBUG_COUT = true;
+//#define DEBUG_COUT = true;
 
 /******************************************************************************
  * Checks if the SocketIO event has JSON data.
@@ -231,7 +231,7 @@ bool checkForPassingRoom(double ego_s, double ego_vel, int check_id, double chec
 {
   static const double S_SLOW_CAR_AHEAD_m = 40.0;
   static const double S_PASSING_AHEAD_m = 30.0;
-  static const double S_PASSING_BEHIND_m = 7.5;
+  static const double S_PASSING_BEHIND_m = 15.0;
 
   double clearance = abs(ego_s-check_s);
 
@@ -450,10 +450,11 @@ int main() {
 
                   if (car_speed > check_speed)
                     ref_vel -= 0.224;
-
+#ifdef DEBUG_COUT
                   cout << "\tCollision " << check_id << ":" << check_lane
                                        << " S:" << check_s << " D:" << check_d
                                        << " vel:" << check_speed << endl;
+#endif
                 }
                 else
                   cleared_ids.push_back(check_id);
@@ -462,9 +463,11 @@ int main() {
               // Trying to change lanes
               else if (laneState == LANE_PREPARE_CHANGE)
               {
+#ifdef DEBUG_COUT
                 cout << "\tCheck " << check_id << ":" << check_lane
                      << " S:" << check_s << " D:" << check_d
                      << " vel:" << check_speed << endl;
+#endif
 
                 // Record no gap if desired lane is occupied
                 if ((check_lane == lane_desired) &&
