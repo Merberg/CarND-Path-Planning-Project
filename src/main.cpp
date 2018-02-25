@@ -20,8 +20,21 @@ constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
 
+static const int LEFT_LANE = 0;
+static const int MIDDLE_LANE = 1;
+static const int RIGHT_LANE = 2;
+
 // For converting from lane and d
-double lane2d(double lane) { return 2 + 4*lane; }
+double lane2d(int lane) { return 2 + 4*lane; }
+int d2lane(double d)
+{
+  if (d < 4)
+    return LEFT_LANE;
+  else if (d < 8)
+    return MIDDLE_LANE;
+  else
+    return RIGHT_LANE;
+}
 
 enum LaneState
 {
@@ -195,14 +208,11 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 /******************************************************************************
  * Check the lane for a potential collision
  */
-bool checkForCollision(double ego_lane, double ego_s, int check_id, double check_d, double check_s)
+bool checkForCollision(double ego_s, int check_id, double check_s)
 {
   static const double COLLISION_m = 30.0;
-  double lane_d = 2 + 4*ego_lane;
-
-  bool inLane = (check_d < lane_d+2) & (check_d > lane_d-2);
   bool tooClose = (check_s > ego_s) & ((check_s-ego_s) < COLLISION_m);
-  bool collision = (inLane && tooClose) ? true : false;
+  bool collision = (tooClose) ? true : false;
 
 #ifdef DEBUG_COUT
   if (collision)
@@ -218,7 +228,7 @@ bool checkForCollision(double ego_lane, double ego_s, int check_id, double check
 bool checkForPassingRoom(double ego_s, double ego_vel, int check_id, double check_s, double check_vel)
 {
   static const double S_SLOW_CAR_AHEAD_m = 40.0;
-  static const double S_PASSING_AHEAD_m = 15.0;
+  static const double S_PASSING_AHEAD_m = 30.0;
   static const double S_PASSING_BEHIND_m = 7.5;
 
   double clearance = abs(ego_s-check_s);
@@ -230,10 +240,58 @@ bool checkForPassingRoom(double ego_s, double ego_vel, int check_id, double chec
 
 #ifdef DEBUG_COUT
   if (!passingRoom)
-    cout << "\tPassing blocked " << check_id << "\t" << aheadTooClose << aheadSlower << ":" << behindTooClose << endl;
+    cout << "\tPassing blocked by " << check_id << "\t" << aheadTooClose << aheadSlower << ":" << behindTooClose << endl;
 #endif
 
   return passingRoom;
+}
+
+/******************************************************************************
+ * Check that all IDs have been accounted for and that one wasn't accidentally
+ * dropped
+ */
+bool checkTrackedIds(vector<int>&tracked_ids, vector<int>&blocking_ids, vector<int>&cleared_ids)
+{
+  int nTracked = tracked_ids.size();
+  bool trackingOk = true;
+
+  if ( nTracked > 0)
+  {
+    for (unsigned i=0; i<tracked_ids.size(); i++)
+    {
+      bool found = false;
+
+      //First search the blocking list
+      for (unsigned j=0; !found && j<blocking_ids.size(); j++)
+      {
+        if (tracked_ids[i] == blocking_ids[j])
+          found = true;
+      }
+
+      //Then search the cleared
+      for (unsigned j=0; !found && j<cleared_ids.size(); j++)
+      {
+        if (tracked_ids[i] == cleared_ids[j])
+          found = true;
+      }
+
+      if (!found)
+      {
+        trackingOk = false;
+        blocking_ids.push_back(tracked_ids[i]);
+      }
+    }
+  }
+
+#ifdef DEBUG_COUT
+  if (!trackingOk)
+    cout << "\tMissing Track" << endl;
+#endif
+
+  //Make the blocked list the tracked list
+  tracked_ids = blocking_ids;
+
+  return trackingOk;
 }
 
 /******************************************************************************
@@ -298,14 +356,16 @@ int main() {
   LaneState laneState = LANE_KEEP;
   int lane = 1;
   int lane_desired = 1;
+  vector<int> tracked_ids;
 
 
   // Reference velocity to target
   double ref_vel = 0.0;  //mph
   double prepare_vel = 0;
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&laneState,&lane,&lane_desired,&ref_vel, &prepare_vel](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
-                     uWS::OpCode opCode) {
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,
+               &map_waypoints_dy,&laneState,&lane,&lane_desired,&tracked_ids,&ref_vel, &prepare_vel]
+               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
     // The 2 signifies a websocket event
@@ -347,11 +407,11 @@ int main() {
 
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
-            double passing_lane_d = lane2d(lane_desired);
-          	bool passing_allowed = true;
-          	static const double RIGHT_LANE_MIN_d = lane2d(2) - 2;
-          	bool pass_on_right = (lane == 1) ? true : false;
           	bool collision_warning = false;
+            	bool passing_allowed = true;
+          	bool pass_on_right = (lane == MIDDLE_LANE) ? true : false;
+          	vector<int> blocking_ids;
+          	vector<int> cleared_ids;
 
             if (previous_size > 0)
             {
@@ -361,7 +421,7 @@ int main() {
 
             //Helpful printing if needed for debug
 #ifdef DEBUG_COUT
-            cout << "Lane:" << lane << " (" << laneState << ") S:" << car_s << " D:" << car_d << endl;
+            cout << laneState << " Lane: " << lane << "(" << lane_desired << ") S:" << car_s << " D:" << car_d << endl;
 #endif
 
             /******************************************************************
@@ -376,45 +436,65 @@ int main() {
               double check_s = sensor_fusion[i][5];
               check_s += ((double)previous_size*0.02*check_speed);
               float check_d = sensor_fusion[i][6];
+              int check_lane = d2lane(check_d);
 
               // Car in lane
-              if (checkForCollision(lane, car_s, check_id, check_d, check_s))
+              if (check_lane == lane)
               {
-                collision_warning = true;
-                prepare_vel = check_speed;
+                if (checkForCollision(car_s, check_id, check_s))
+                {
+                  collision_warning = true;
+                  prepare_vel = check_speed;
+                  blocking_ids.push_back(check_id);
 
-                if (ref_vel > prepare_vel)
-                  ref_vel -= 0.224;
+                  if (ref_vel > prepare_vel)
+                    ref_vel -= 0.224;
+                }
+                else
+                  cleared_ids.push_back(check_id);
               }
+
               // Trying to change lanes
               else if (laneState == LANE_PREPARE_CHANGE)
               {
+                cout << "\tCheck " << check_id << ":" << check_lane << " S:" << check_s << " D:" << check_d << endl;
+
                 // Record no gap if desired lane is occupied
-                if ((check_d < passing_lane_d+2) && (check_d > passing_lane_d-2))
+                if ((check_lane == lane_desired) &&
+                    !checkForPassingRoom(car_s, prepare_vel, check_id, check_s, check_speed))
                 {
-                  passing_allowed &= checkForPassingRoom(car_s, prepare_vel, check_id, check_s, check_speed);
+                  passing_allowed = false;
+                  blocking_ids.push_back(check_id);
                 }
                 // Otherwise look for a right opening from center
-                else if ((lane == 1) && (check_d > RIGHT_LANE_MIN_d))
+                else if ((lane == MIDDLE_LANE) && (check_lane == RIGHT_LANE) &&
+                    !checkForPassingRoom(car_s, prepare_vel, check_id, check_s, check_speed))
                 {
-                  pass_on_right &= checkForPassingRoom(car_s, prepare_vel, check_id, check_s, check_speed);
+                  pass_on_right = false;
+                  blocking_ids.push_back(check_id);
                 }
+                else
+                  cleared_ids.push_back(check_id);
               }
+
             }
 
             /******************************************************************
-             * Simplistic Path Planning
+             * Behavior Planning
              */
+            bool trackingOk = true;
+
             switch (laneState)
             {
               case LANE_PREPARE_CHANGE:
-                if (passing_allowed)
+                trackingOk = checkTrackedIds(tracked_ids, blocking_ids, cleared_ids);
+                if (trackingOk && passing_allowed)
                 {
                   laneState = LANE_CHANGE;
                 }
-                else if (pass_on_right)
+                else if (trackingOk && pass_on_right)
                 {
-                  lane_desired = 2;
+                  lane_desired = RIGHT_LANE;
                   laneState = LANE_CHANGE;
 #ifdef DEBUG_COUT
                   cout << "\tRight lane pass" << endl;
@@ -428,6 +508,7 @@ int main() {
                 //clear the collision_warning so that the car can increase speed
                 //with the lane change
                 collision_warning = false;
+                tracked_ids.clear();
                 break;
 
               case LANE_KEEP:
