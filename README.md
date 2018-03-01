@@ -37,7 +37,7 @@ The main loop of the executable steps through the following segments of logic, w
 
 ### 1. Vehicle Traffic Tracking
 
-Sensor fustion data is used to determine if a collision is possible; `CarInFront_s - Ego_s < 30.0 m`
+Sensor fustion data is used to determine if a collision is possible; `CarInFront_s - Ego_s < 30.0 m`.
 It is also used to check if there is room when the ego vehicle wants to pass:
 ```
   clearance = abs(ego_s-check_s);
