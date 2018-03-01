@@ -45,7 +45,7 @@ enum LaneState
 
 static const double TARGET_VEL = 49.5;
 
-#define DEBUG_COUT = true;
+//#define DEBUG_COUT = true;
 
 /******************************************************************************
  * Checks if the SocketIO event has JSON data.
