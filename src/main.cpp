@@ -45,7 +45,7 @@ enum LaneState
 
 static const double TARGET_VEL = 49.5;
 
-//#define DEBUG_COUT = true;
+#define DEBUG_COUT = true;
 
 /******************************************************************************
  * Checks if the SocketIO event has JSON data.
@@ -231,18 +231,21 @@ bool checkForPassingRoom(double ego_s, double ego_vel, int check_id, double chec
 {
   static const double S_SLOW_CAR_AHEAD_m = 40.0;
   static const double S_PASSING_AHEAD_m = 30.0;
-  static const double S_PASSING_BEHIND_m = 15.0;
+  static const double S_PASSING_BEHIND_m = 10.0;
+  static const double S_FAST_CAR_BEHIND_m = 20.0;
 
   double clearance = abs(ego_s-check_s);
 
   bool aheadTooClose = (ego_s < check_s) & (clearance < S_PASSING_AHEAD_m);
+  bool aheadTooSlow = (ego_s < check_s) & (clearance < S_SLOW_CAR_AHEAD_m) & (check_vel < ego_vel);
   bool behindTooClose = (ego_s > check_s) & (clearance < S_PASSING_BEHIND_m);
-  bool aheadSlower = (ego_s < check_s) & (clearance < S_SLOW_CAR_AHEAD_m) & (check_vel < ego_vel);
-  bool passingRoom = (aheadTooClose || behindTooClose || aheadSlower) ? false : true;
+  bool behindTooFast = (ego_s > check_s) & (clearance < S_FAST_CAR_BEHIND_m) & (check_vel > (TARGET_VEL-5));
+  bool passingRoom = (aheadTooClose || aheadTooSlow || behindTooClose || behindTooFast) ? false : true;
 
 #ifdef DEBUG_COUT
   if (!passingRoom)
-    cout << "\tPassing blocked by " << check_id << "\t" << aheadTooClose << aheadSlower << ":" << behindTooClose << endl;
+    cout << "\tPassing blocked by " << check_id << "\t" << aheadTooClose << aheadTooSlow
+         << ":" << behindTooClose << behindTooFast << endl;
 #endif
 
   return passingRoom;
